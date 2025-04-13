@@ -41,6 +41,8 @@ const (
 	MsgNotInterested = 3
 )
 
+var peerHandlerWG sync.WaitGroup
+
 func connectToPeer(peerAddr string) (*Peer, error) {
 	conn, err := net.DialTimeout("tcp", peerAddr, 5*time.Second)
 	if err != nil {
@@ -143,64 +145,62 @@ func handleOnePeer(peerAddr string, infoHash [20]byte, peerID [20]byte) error {
 	fmt.Println("Handshake successful! Peer ID:", string(peer.PeerID[:]))
 
 	// start listening for the peer
-
-	for {
-		msg, err := readMessage(peer.Conn)
-
-		if err != nil {
-			fmt.Printf("Error reading from %s: %v\n", peer.Conn.RemoteAddr(), err)
-			break
+	peerHandlerWG.Add(1)
+	go func() {
+		defer peerHandlerWG.Done()
+		for {
+			msg, err := readMessage(peer.Conn)
+			if err != nil {
+				fmt.Printf("Error reading from %s: %v\n", peer.Conn.RemoteAddr(), err)
+				break
+			}
+			if msg == nil {
+				fmt.Println("keep alive message")
+				continue
+			}
+			peer.MessageChan <- msg.Payload
+			handleMessage(peer, msg)
 		}
-		if msg == nil {
-			fmt.Printf("keep alive message")
-			continue
-		}
-		peer.MessageChan <- msg.Payload
-		handleMessage(peer, msg)
-	}
+	}()
 
 	return nil
 }
-
 func HandlePeersConcurrently(peerList []string, infoHash [20]byte, peerID [20]byte) error {
 	if len(peerList) == 0 {
 		return fmt.Errorf("no peers available")
 	}
-
 	var (
 		wg          sync.WaitGroup
 		errChan     = make(chan error, len(peerList))
 		peerChan    = make(chan string)
 		ctx, cancel = context.WithCancel(context.Background())
 	)
-	defer cancel() // Ensure all resources are cleaned up
+	defer cancel()
 
-	// Worker goroutines with panic recovery
 	worker := func() {
 		defer wg.Done()
 		for peerAddr := range peerChan {
-			// Handle each peer with timeout
 			err := handlePeerWithTimeout(ctx, peerAddr, infoHash, peerID)
 			if err != nil {
 				select {
-				case errChan <- fmt.Errorf("peer %s: %w", peerAddr, err):
+				case errChan <- fmt.Errorf("Peer %s: %w", peerAddr, err):
 				case <-ctx.Done():
 					return
+
 				}
 			} else {
-				fmt.Printf("Successfully connected to peer %s\n", peerAddr)
+				fmt.Printf("Succesfully connected to peer %s \n", peerAddr)
 			}
 		}
-	}
 
-	// Start worker pool
-	workerLimit := min(50, len(peerList)) // Don't create unnecessary workers
+	}
+	workerLimit := min(50, len(peerList))
+
 	for i := 0; i < workerLimit; i++ {
 		wg.Add(1)
 		go worker()
 	}
 
-	// Feed peers to workers
 	go func() {
 		defer close(peerChan)
 		for _, peerAddr := range peerList {
@@ -212,23 +212,18 @@ func HandlePeersConcurrently(peerList []string, infoHash [20]byte, peerID [20]by
 		}
 	}()
 
-	// Wait for completion
-	go func() {
-		wg.Wait()
-		close(errChan)
-	}()
+	wg.Wait()
 
-	// Collect errors with context awareness
+	close(errChan)
 	var errors []error
 	for err := range errChan {
 		errors = append(errors, err)
-		if len(errors) > 10 { // Early exit if too many errors
+		if len(errors) > 10 {
 			cancel()
 			break
 		}
 	}
 
-	// Analyze results
 	switch {
 	case len(errors) == len(peerList):
 		return fmt.Errorf("all %d peers failed: %w", len(peerList), errors[0])
@@ -238,6 +233,7 @@ func HandlePeersConcurrently(peerList []string, infoHash [20]byte, peerID [20]by
 	default:
 		return nil
 	}
+
 }
 
 func handlePeerWithTimeout(ctx context.Context, addr string, infoHash [20]byte, peerID [20]byte) error {
@@ -245,11 +241,14 @@ func handlePeerWithTimeout(ctx context.Context, addr string, infoHash [20]byte, 
 	defer cancel()
 
 	done := make(chan error, 1)
-	go func() { done <- handleOnePeer(addr, infoHash, peerID) }()
+
+	go func() {
+		done <- handleOnePeer(addr, infoHash, peerID)
+	}()
 
 	select {
-	case err := <-done:
-		return err
+	case returnedValue := <-done:
+		return returnedValue
 	case <-ctx.Done():
 		return fmt.Errorf("timeout: %w", ctx.Err())
 	}
@@ -260,4 +259,8 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func WaitForPeerHandlers() {
+	peerHandlerWG.Wait()
 }

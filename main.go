@@ -65,5 +65,5 @@ func main() {
 			fmt.Println("- Network configuration issues")
 		}
 	}
-	select {}
+	peers.WaitForPeerHandlers()
 }
