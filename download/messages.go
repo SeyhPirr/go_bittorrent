@@ -1,10 +1,12 @@
-package peers
+package download
 
 import (
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
+
+	. "github.com/seyhpirr/go_bittorrent/peers"
 )
 
 type Message struct {
@@ -60,15 +62,15 @@ func handleMessage(peer *Peer, msg *Message) {
 	switch msg.ID {
 	case 0: // choke
 		fmt.Println("⛔ Received choke from", peer.IP)
-		peer.mutex.Lock()
+		peer.Mutex.Lock()
 		peer.Choked = true
-		peer.mutex.Unlock()
+		peer.Mutex.Unlock()
 
 	case 1: // unchoke
 		fmt.Println("✅ Received unchoke from", peer.IP)
-		peer.mutex.Lock()
+		peer.Mutex.Lock()
 		peer.Choked = false
-		peer.mutex.Unlock()
+		peer.Mutex.Unlock()
 		// send a request for a piece here if needed
 
 	case 4: // have
@@ -78,14 +80,13 @@ func handleMessage(peer *Peer, msg *Message) {
 		}
 		pieceIndex := binary.BigEndian.Uint32(msg.Payload)
 		fmt.Printf("📢 Peer %s has piece %d\n", peer.IP, pieceIndex)
-		// Optionally mark the piece as available in some global state or request it
+		// send interested message
 
 	case 5: // bitfield
 		fmt.Println("🧩 Received bitfield from", peer.IP)
-		peer.mutex.Lock()
+		peer.Mutex.Lock()
 		peer.Bitfield = msg.Payload
-		peer.mutex.Unlock()
-		// Evaluate which pieces to request based on your strategy
+		peer.Mutex.Unlock()
 
 	case 7: // piece
 		fmt.Printf("📦 Received piece from %s\n", peer.IP)
@@ -96,24 +97,48 @@ func handleMessage(peer *Peer, msg *Message) {
 	}
 }
 
-func GetThePeerList() {
-	// a function that prints the peer list
+func sendMessage(conn net.Conn, msg *Message) error {
+	length := uint32(1 + len(msg.Payload))
+	buf := make([]byte, 4+length)
 
-	peersMu.Lock()
-	defer peersMu.Unlock()
+	// write length prefix
+	binary.BigEndian.PutUint32(buf[0:4], length)
+	buf[4] = msg.ID
 
-	fmt.Println("🌐 Connected Peers List:")
-	if len(currentPeers) == 0 {
-		fmt.Println("No connected peers.")
-		return
+	// write payload if present
+	if len(msg.Payload) > 0 {
+		copy(buf[5:], msg.Payload)
 	}
+	_, err := conn.Write(buf)
 
-	for i, peer := range currentPeers {
-		status := "Connected"
-		if !peer.connected {
-			status = "Disconnected"
-		}
-		fmt.Printf("%d. IP: %s | Port: %d | Choked: %t | Status: %s\n",
-			i+1, peer.IP.String(), peer.Port, peer.Choked, status)
+	return err
+}
+
+func sendInterested(conn net.Conn) error {
+	msg := &Message{
+		ID:      2,
+		Payload: nil,
 	}
+	return sendMessage(conn, msg)
+}
+
+func sendNotInterested(conn net.Conn) error {
+	msg := &Message{
+		ID:      3,
+		Payload: nil,
+	}
+	return sendMessage(conn, msg)
+}
+
+func sendRequest(conn net.Conn, index, begin, length int) error {
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint32(payload[0:4], uint32(index))
+	binary.BigEndian.PutUint32(payload[4:8], uint32(begin))
+	binary.BigEndian.PutUint32(payload[8:12], uint32(length))
+
+	msg := &Message{
+		ID:      6, // request
+		Payload: payload,
+	}
+	return sendMessage(conn, msg)
 }

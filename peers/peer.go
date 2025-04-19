@@ -18,8 +18,8 @@ type Peer struct {
 	Bitfield    []byte
 	PeerID      [20]byte
 	MessageChan chan []byte
-	mutex       sync.Mutex
-	connected   bool
+	Mutex       sync.Mutex
+	Connected   bool
 }
 
 var (
@@ -40,8 +40,6 @@ const (
 	MsgInterested    = 2
 	MsgNotInterested = 3
 )
-
-var peerHandlerWG sync.WaitGroup
 
 func connectToPeer(peerAddr string) (*Peer, error) {
 	conn, err := net.DialTimeout("tcp", peerAddr, 5*time.Second)
@@ -74,7 +72,7 @@ func connectToPeer(peerAddr string) (*Peer, error) {
 		Choked:      true,                  // Default to choked state
 		Bitfield:    nil,                   // Will be populated after handshake
 		MessageChan: make(chan []byte, 10), // Buffered message channel
-		connected:   true,                  // Mark as connected
+		Connected:   true,                  // Mark as connected
 		// PeerID will be set after successful handshake
 	}, nil
 
@@ -136,7 +134,7 @@ func handleOnePeer(peerAddr string, infoHash [20]byte, peerID [20]byte) error {
 	}
 	// now peer struct is complete
 	peer.PeerID = handshake.PeerID
-	peer.connected = true
+	peer.Connected = true
 
 	//add the peer to the currentPeers if the handshake is succesfull
 	peersMu.Lock()
@@ -144,30 +142,11 @@ func handleOnePeer(peerAddr string, infoHash [20]byte, peerID [20]byte) error {
 	peersMu.Unlock()
 	fmt.Println("Handshake successful! Peer ID:", string(peer.PeerID[:]))
 
-	// start listening for the peer
-	peerHandlerWG.Add(1)
-	go func() {
-		defer peerHandlerWG.Done()
-		for {
-			msg, err := readMessage(peer.Conn)
-			if err != nil {
-				fmt.Printf("Error reading from %s: %v\n", peer.Conn.RemoteAddr(), err)
-				break
-			}
-			if msg == nil {
-				fmt.Println("keep alive message")
-				continue
-			}
-			peer.MessageChan <- msg.Payload
-			handleMessage(peer, msg)
-		}
-	}()
-
 	return nil
 }
-func HandlePeersConcurrently(peerList []string, infoHash [20]byte, peerID [20]byte) error {
+func HandlePeersConcurrently(peerList []string, infoHash [20]byte, peerID [20]byte) ([]*Peer, error) {
 	if len(peerList) == 0 {
-		return fmt.Errorf("no peers available")
+		return nil, fmt.Errorf("no peers available")
 	}
 	var (
 		wg          sync.WaitGroup
@@ -224,16 +203,22 @@ func HandlePeersConcurrently(peerList []string, infoHash [20]byte, peerID [20]by
 		}
 	}
 
+	// collect succesfully connected peers
+
+	peersMu.Lock()
+	peersCopy := make([]*Peer, len(currentPeers))
+	copy(peersCopy, currentPeers)
+	peersMu.Unlock()
+
 	switch {
 	case len(errors) == len(peerList):
-		return fmt.Errorf("all %d peers failed: %w", len(peerList), errors[0])
+		return peersCopy, fmt.Errorf("all %d peers failed: %w", len(peerList), errors[0])
 	case len(errors) > 0:
-		return fmt.Errorf("%d/%d peers failed. First error: %w",
+		return peersCopy, fmt.Errorf("%d/%d peers failed. First error: %w",
 			len(errors), len(peerList), errors[0])
 	default:
-		return nil
+		return peersCopy, nil
 	}
-
 }
 
 func handlePeerWithTimeout(ctx context.Context, addr string, infoHash [20]byte, peerID [20]byte) error {
@@ -259,8 +244,4 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-}
-
-func WaitForPeerHandlers() {
-	peerHandlerWG.Wait()
 }
